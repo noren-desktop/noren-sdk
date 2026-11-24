@@ -1,3 +1,4 @@
+pub mod branding;
 pub mod error;
 pub mod node;
 pub mod paths;
@@ -160,6 +161,61 @@ mod tests {
         let reloaded = load_kv_file(&conf, &manifest).unwrap();
         assert_eq!(reloaded.get("gap"), Some(&FieldValue::Number(24.0)));
         assert_eq!(reloaded.get("overview_hint"), Some(&FieldValue::Bool(false)));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kv_color_field_preserves_and_normalizes_accent() {
+        let dir = unique_temp_dir("kv_accent");
+        let conf = dir.join("noren-wm.conf");
+        fs::write(&conf, "focus_border = windows\n").unwrap();
+
+        let manifest = ModuleManifest {
+            id: "wm".to_string(),
+            name: "WM".to_string(),
+            version: "0.1.0".to_string(),
+            executable: None,
+            config_format: ConfigFormat::Kv,
+            config_file: "noren-wm.conf".to_string(),
+            groups: vec![FieldGroup {
+                id: "colors".to_string(),
+                title: "Colors".to_string(),
+                fields: vec![FieldDef {
+                    key: "focus_border".to_string(),
+                    label: "Focus Border".to_string(),
+                    kind: FieldKind::Color,
+                    description: None,
+                    requires_running: false,
+                    default_bool: None,
+                    default_number: None,
+                    default_text: Some("off".to_string()),
+                    min: None,
+                    max: None,
+                    step: None,
+                    choices: Vec::new(),
+                    nullable: true,
+                    placeholder: None,
+                    command: None,
+                }],
+            }],
+            advanced_editors: Vec::new(),
+        };
+
+        let vals = load_kv_file(&conf, &manifest).unwrap();
+        save_kv_preserving_comments(&conf, &manifest, &vals).unwrap();
+        let saved = fs::read_to_string(&conf).unwrap();
+        assert!(saved.contains("focus_border = accent"), "{saved}");
+
+        let mut custom_vals = load_kv_file(&conf, &manifest).unwrap();
+        assert_eq!(
+            custom_vals.get("focus_border"),
+            Some(&FieldValue::Text("accent".to_string()))
+        );
+        custom_vals.insert("focus_border".to_string(), FieldValue::Text("Accent".to_string()));
+        save_kv_preserving_comments(&conf, &manifest, &custom_vals).unwrap();
+        let saved2 = fs::read_to_string(&conf).unwrap();
+        assert!(saved2.contains("focus_border = accent"), "{saved2}");
 
         let _ = fs::remove_dir_all(&dir);
     }

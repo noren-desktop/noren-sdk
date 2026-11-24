@@ -122,8 +122,14 @@ fn format_kv_value(field: &FieldDef, val: &FieldValue) -> String {
         }
         (FieldKind::Number, FieldValue::Number(n)) => format!("{}", n.round() as i64),
         (FieldKind::Color, FieldValue::Text(s)) => {
-            if parse_hex_color(s).is_some() {
-                s.trim().to_string()
+            let t = s.trim();
+            if t.eq_ignore_ascii_case("accent")
+                || t.eq_ignore_ascii_case("windows")
+                || t.eq_ignore_ascii_case("system")
+            {
+                "accent".to_string()
+            } else if parse_hex_color(t).is_some() {
+                t.to_string()
             } else {
                 "off".to_string()
             }

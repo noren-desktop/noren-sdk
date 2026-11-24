@@ -197,6 +197,7 @@ enum Msg {
     SetText(String, String),
     ToggleFieldColorPicker(String),
     PickFieldColor(String, Color),
+    SetFieldColorAccent(String),
     SetFieldColorOff(String),
     InvokeAction(String, String),
     OpenAdvancedEditor(String),
@@ -222,6 +223,7 @@ impl Clone for Msg {
             Self::SetText(k, v) => Self::SetText(k.clone(), v.clone()),
             Self::ToggleFieldColorPicker(k) => Self::ToggleFieldColorPicker(k.clone()),
             Self::PickFieldColor(k, c) => Self::PickFieldColor(k.clone(), *c),
+            Self::SetFieldColorAccent(k) => Self::SetFieldColorAccent(k.clone()),
             Self::SetFieldColorOff(k) => Self::SetFieldColorOff(k.clone()),
             Self::InvokeAction(l, c) => Self::InvokeAction(l.clone(), c.clone()),
             Self::OpenAdvancedEditor(c) => Self::OpenAdvancedEditor(c.clone()),
@@ -588,14 +590,24 @@ impl ControlCenterApp {
                     Some(FieldValue::Text(s)) => s.clone(),
                     _ => "off".to_string(),
                 };
+                let is_accent = matches!(
+                    cur_text.trim().to_ascii_lowercase().as_str(),
+                    "accent" | "windows" | "system"
+                );
                 let parsed_rgb = parse_hex_color(&cur_text);
-                let swatch_color = parsed_rgb
-                    .map(|(r, g, b)| Color::rgb(r, g, b))
-                    .unwrap_or_else(|| Color::argb(40, 128, 128, 128));
+                let swatch_color = if is_accent {
+                    let (r, g, b) = self.theme.resolve().accent_rgb;
+                    Color::rgb(r, g, b)
+                } else {
+                    parsed_rgb
+                        .map(|(r, g, b)| Color::rgb(r, g, b))
+                        .unwrap_or_else(|| Color::argb(40, 128, 128, 128))
+                };
                 let picker_open = self.expanded_color_picker.as_deref() == Some(field.key.as_str());
 
                 let k_txt = key.clone();
                 let k_pick = key.clone();
+                let k_acc = key.clone();
                 let k_off = key.clone();
                 let k_cp = key.clone();
 
@@ -615,7 +627,7 @@ impl ControlCenterApp {
                         TextBox::new()
                             .width(120.0)
                             .text(cur_text)
-                            .placeholder_text("#RRGGBB")
+                            .placeholder_text("#RRGGBB / accent")
                             .is_enabled(enabled)
                             .on_text_changed(ctx.callback(move |t| Msg::SetText(k_txt.clone(), t))),
                     ),
@@ -625,6 +637,13 @@ impl ControlCenterApp {
                             .is_enabled(enabled)
                             .on_click(ctx.message(Msg::ToggleFieldColorPicker(k_pick)))
                             .content(if picker_open { "Hide Picker" } else { "Pick" }),
+                    ),
+                    KeyedView::new(
+                        "accent_btn",
+                        Button::new()
+                            .is_enabled(enabled)
+                            .on_click(ctx.message(Msg::SetFieldColorAccent(k_acc)))
+                            .content("Accent"),
                     ),
                 ];
                 if field.nullable {
@@ -645,7 +664,10 @@ impl ControlCenterApp {
                 if picker_open {
                     let picker_color = parsed_rgb
                         .map(|(r, g, b)| Color::rgb(r, g, b))
-                        .unwrap_or_else(|| Color::rgb(79, 168, 245));
+                        .unwrap_or_else(|| {
+                            let (r, g, b) = self.theme.resolve().accent_rgb;
+                            Color::rgb(r, g, b)
+                        });
                     StackPanel::new().spacing(8.0).children((
                         row,
                         ColorPicker::new()
@@ -886,6 +908,14 @@ impl Component for ControlCenterApp {
                 if let Some(tab) = self.current_module_mut() {
                     tab.values
                         .insert(k, FieldValue::Text(format_hex_color(c.r, c.g, c.b)));
+                }
+            }
+            Msg::SetFieldColorAccent(k) => {
+                if self.expanded_color_picker.as_deref() == Some(k.as_str()) {
+                    self.expanded_color_picker = None;
+                }
+                if let Some(tab) = self.current_module_mut() {
+                    tab.values.insert(k, FieldValue::Text("accent".to_string()));
                 }
             }
             Msg::SetFieldColorOff(k) => {
