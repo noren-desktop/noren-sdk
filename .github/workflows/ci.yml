@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check all targets
+        run: cargo check --all-targets
+      - name: Run unit tests
+        run: cargo test --lib
+      - name: Build release
+        run: cargo build --release
