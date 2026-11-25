@@ -15,7 +15,7 @@ use windows_reactor::*;
 
 use crate::error::SdkError;
 use crate::node::{NipEvent, NipNode, NodeConfig};
-use crate::paths::{module_config_path, pipe_prefix};
+use crate::paths::{manifests_dir, module_config_path, pipe_prefix};
 use crate::pipe::{OverlappedPipe, connect_client_pipe, discover_peers, EventHandle};
 use crate::protocol::{CAP_CONTROLCENTER_FOCUS, CAP_SETTINGS_SCHEMA, Message, PROTOCOL_VERSION};
 use crate::schema::{
@@ -44,8 +44,60 @@ pub fn maybe_run_control_center_from_args() -> Option<Result<(), SdkError>> {
     Some(run_control_center(initial_tab))
 }
 
+fn select_newest_control_center_exe_in(
+    current: PathBuf,
+    manifests: &std::path::Path,
+) -> PathBuf {
+    let mut best_exe = current;
+    let mut best_mtime = std::fs::metadata(&best_exe)
+        .and_then(|m| m.modified())
+        .ok();
+
+    let Ok(entries) = std::fs::read_dir(manifests) else {
+        return best_exe;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(table) = toml::from_str::<toml::Table>(&text) else {
+            continue;
+        };
+        let Some(exe_str) = table.get("executable").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let cand = PathBuf::from(exe_str);
+        if !cand.is_file() {
+            continue;
+        }
+        if let Ok(mtime) = std::fs::metadata(&cand).and_then(|m| m.modified()) {
+            let is_newer = match best_mtime {
+                Some(prev) => mtime > prev,
+                None => true,
+            };
+            if is_newer {
+                best_mtime = Some(mtime);
+                best_exe = cand;
+            }
+        }
+    }
+    best_exe
+}
+
+fn select_newest_control_center_exe() -> Result<PathBuf, SdkError> {
+    let current = std::env::current_exe()?;
+    Ok(select_newest_control_center_exe_in(
+        current,
+        &manifests_dir(),
+    ))
+}
+
 /// Opens the Control Center window (focusing an existing instance if one is open,
-/// or spawning the current executable with `--control-center`).
+/// or spawning the newest installed module executable with `--control-center`).
 pub fn open_control_center(initial_tab: Option<&str>) -> Result<(), SdkError> {
     if let Ok(sid) = current_user_sid() {
         if let Ok(peers) = discover_peers("__cc_launcher__", &sid) {
@@ -57,7 +109,7 @@ pub fn open_control_center(initial_tab: Option<&str>) -> Result<(), SdkError> {
         }
     }
 
-    let exe = std::env::current_exe()?;
+    let exe = select_newest_control_center_exe()?;
     let mut cmd = Command::new(exe);
     cmd.arg("--control-center");
     if let Some(tab) = initial_tab {
@@ -317,16 +369,13 @@ impl ControlCenterApp {
         }
     }
 
-    fn refresh_manifests(&mut self) {
-        let installed = load_installed_manifests();
-        for manifest in installed {
-            if let Some(existing) = self.tabs.iter_mut().find(|t| t.manifest.id == manifest.id) {
-                existing.manifest = manifest;
-                for (k, v) in default_values_for_manifest(&existing.manifest) {
-                    existing.values.entry(k).or_insert(v);
-                }
-                continue;
+    fn upsert_manifest(&mut self, manifest: ModuleManifest) {
+        if let Some(existing) = self.tabs.iter_mut().find(|t| t.manifest.id == manifest.id) {
+            existing.manifest = manifest;
+            for (k, v) in default_values_for_manifest(&existing.manifest) {
+                existing.values.entry(k).or_insert(v);
             }
+        } else {
             let config_path = module_config_path(&manifest.id, &manifest.config_file);
             let values = load_config_values(&config_path, &manifest).unwrap_or_default();
             self.tabs.push(ModuleTab {
@@ -335,6 +384,15 @@ impl ControlCenterApp {
                 running: false,
                 values,
             });
+            self.tabs.sort_by(|a, b| a.manifest.id.cmp(&b.manifest.id));
+        }
+        self.sync_peer_statuses();
+    }
+
+    fn refresh_manifests(&mut self) {
+        let installed = load_installed_manifests();
+        for manifest in installed {
+            self.upsert_manifest(manifest);
         }
         self.sync_peer_statuses();
     }
@@ -843,6 +901,10 @@ impl ControlCenterApp {
                     })
                     .into()
             }
+            FieldKind::Unknown => TextBlock::new()
+                .text("Unsupported field type in this Control Center build; open Settings from the updated module binary to edit.")
+                .text_wrapping(TextWrapping::Wrap)
+                .into(),
         };
 
         let mut header = vec![KeyedView::new(
@@ -931,6 +993,13 @@ impl Component for ControlCenterApp {
                         NipEvent::PeerConnected(_) | NipEvent::PeerDisconnected { .. } => {
                             self.refresh_manifests();
                         }
+                        NipEvent::StateReceived { cap, data, .. }
+                            if cap == CAP_SETTINGS_SCHEMA =>
+                        {
+                            if let Ok(manifest) = serde_json::from_value::<ModuleManifest>(data) {
+                                self.upsert_manifest(manifest);
+                            }
+                        }
                         NipEvent::ThemeChanged(theme) => {
                             self.theme = theme;
                             self.status = "Theme updated via theme.changed.".to_string();
@@ -942,8 +1011,8 @@ impl Component for ControlCenterApp {
                             reply,
                             ..
                         } if cap == CAP_CONTROLCENTER_FOCUS && name == "focus" => {
+                            self.refresh_manifests();
                             if let Some(tab_id) = data.get("tab").and_then(|v| v.as_str()) {
-                                self.refresh_manifests();
                                 if self.tabs.iter().any(|t| t.manifest.id == tab_id) {
                                     self.active_tab = TabSelection::Module(tab_id.to_string());
                                 }
@@ -1345,4 +1414,43 @@ fn accent_mode_btn(
         b = b.style(ButtonStyle::Accent);
     }
     b.content(label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn picks_newest_executable_from_manifests() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("noren_cc_exe_pick_{nanos}"));
+        let manifests = dir.join("manifests");
+        fs::create_dir_all(&manifests).unwrap();
+
+        let older_exe = dir.join("old.exe");
+        fs::write(&older_exe, b"old").unwrap();
+        thread::sleep(Duration::from_millis(30));
+        let newer_exe = dir.join("new.exe");
+        fs::write(&newer_exe, b"new").unwrap();
+
+        fs::write(
+            manifests.join("launcher.toml"),
+            format!(
+                "id = \"launcher\"\nexecutable = {:?}\nkind = \"future_field\"\n",
+                newer_exe.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let chosen = select_newest_control_center_exe_in(older_exe.clone(), &manifests);
+        assert_eq!(chosen, newer_exe);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -23,6 +23,8 @@ pub enum FieldKind {
     KeyChord,
     ShortcutList,
     Action,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Declarative module manifest (`noren-module.toml`).
@@ -115,7 +117,7 @@ impl FieldDef {
             FieldKind::Text | FieldKind::KeyChord | FieldKind::ShortcutList => {
                 Some(FieldValue::Text(self.default_text.clone().unwrap_or_default()))
             }
-            FieldKind::Action => None,
+            FieldKind::Action | FieldKind::Unknown => None,
         }
     }
 }

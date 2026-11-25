@@ -197,7 +197,7 @@ pub fn load_kv_file(
             | FieldKind::Text
             | FieldKind::KeyChord
             | FieldKind::ShortcutList => Some(FieldValue::Text(raw_val.to_string())),
-            FieldKind::Action => None,
+            FieldKind::Action | FieldKind::Unknown => None,
         };
         if let Some(val) = parsed {
             values.insert(field.key.clone(), val);
@@ -246,7 +246,9 @@ pub fn save_kv_preserving_comments(
 
     for group in &manifest.groups {
         for field in &group.fields {
-            if field.kind == FieldKind::Action || seen_keys.contains(&field.key) {
+            if matches!(field.kind, FieldKind::Action | FieldKind::Unknown)
+                || seen_keys.contains(&field.key)
+            {
                 continue;
             }
             let Some(cur) = values.get(&field.key) else {
@@ -316,10 +318,17 @@ pub fn save_toml_atomic(
     manifest: &ModuleManifest,
     values: &HashMap<String, FieldValue>,
 ) -> Result<(), SdkError> {
-    let mut table = toml::Table::new();
+    let mut table: toml::Table = if path.exists() {
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+            .unwrap_or_default()
+    } else {
+        toml::Table::new()
+    };
     for group in &manifest.groups {
         for field in &group.fields {
-            if field.kind == FieldKind::Action {
+            if matches!(field.kind, FieldKind::Action | FieldKind::Unknown) {
                 continue;
             }
             if let Some(val) = values.get(&field.key) {

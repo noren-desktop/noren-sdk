@@ -325,6 +325,30 @@ mod tests {
         let reloaded = load_toml_file(&cfg_path, &manifest).unwrap();
         assert_eq!(reloaded.get("bang_shortcuts"), Some(&FieldValue::Text(formatted)));
 
+        let manifest_toml = toml::to_string_pretty(&manifest).unwrap();
+        let manifest_back: ModuleManifest = toml::from_str(&manifest_toml).unwrap();
+        assert_eq!(manifest_back.id, "launcher");
+        assert_eq!(manifest_back.groups[0].fields[0].kind, FieldKind::ShortcutList);
+
+        let future_toml = r#"
+id = "future_mod"
+name = "Future"
+version = "0.2.0"
+config_file = "config.toml"
+
+[[groups]]
+id = "g"
+title = "G"
+
+[[groups.fields]]
+key = "new_widget"
+label = "Future Widget"
+kind = "future_widget"
+"#;
+        let future_manifest: ModuleManifest = toml::from_str(future_toml).unwrap();
+        assert_eq!(future_manifest.id, "future_mod");
+        assert_eq!(future_manifest.groups[0].fields[0].kind, FieldKind::Unknown);
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
