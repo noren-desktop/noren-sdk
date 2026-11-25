@@ -45,3 +45,23 @@ pub fn pipe_prefix() -> String {
     }
     "noren.".to_string()
 }
+
+/// Named mutex used to elect the single Noren Tray Host (`Local\noren-tray-owner-<user-sid>`).
+/// Isolated automatically when `NOREN_TRAY_MUTEX_NAME` or a non-default `NOREN_PIPE_PREFIX` is set.
+pub fn tray_mutex_name(user_sid: &str) -> String {
+    if let Ok(override_name) = std::env::var("NOREN_TRAY_MUTEX_NAME") {
+        let trimmed = override_name.trim();
+        if !trimmed.is_empty() {
+            return format!("Local\\{}", trimmed.trim_start_matches("Local\\"));
+        }
+    }
+    let prefix = pipe_prefix();
+    if prefix != "noren." {
+        let sanitized: String = prefix
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        return format!("Local\\{sanitized}tray-owner-{user_sid}");
+    }
+    format!("Local\\noren-tray-owner-{user_sid}")
+}

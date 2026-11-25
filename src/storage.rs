@@ -192,9 +192,11 @@ pub fn load_kv_file(
                 let max = field.max.unwrap_or(f64::MAX);
                 FieldValue::Number(n.clamp(min, max))
             }),
-            FieldKind::Choice | FieldKind::Color | FieldKind::Text | FieldKind::KeyChord => {
-                Some(FieldValue::Text(raw_val.to_string()))
-            }
+            FieldKind::Choice
+            | FieldKind::Color
+            | FieldKind::Text
+            | FieldKind::KeyChord
+            | FieldKind::ShortcutList => Some(FieldValue::Text(raw_val.to_string())),
             FieldKind::Action => None,
         };
         if let Some(val) = parsed {
@@ -291,7 +293,11 @@ pub fn load_toml_file(
                 }
                 (FieldKind::Number, toml::Value::Float(f)) => Some(FieldValue::Number(*f)),
                 (
-                    FieldKind::Choice | FieldKind::Color | FieldKind::Text | FieldKind::KeyChord,
+                    FieldKind::Choice
+                    | FieldKind::Color
+                    | FieldKind::Text
+                    | FieldKind::KeyChord
+                    | FieldKind::ShortcutList,
                     toml::Value::String(s),
                 ) => Some(FieldValue::Text(s.clone())),
                 _ => None,

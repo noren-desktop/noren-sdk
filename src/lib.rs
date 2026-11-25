@@ -8,6 +8,7 @@ pub mod schema;
 pub mod security;
 pub mod storage;
 pub mod theme;
+pub mod tray;
 
 #[cfg(feature = "control-center")]
 pub mod control_center;
@@ -17,6 +18,7 @@ pub use node::{NipEvent, NipNode, NodeConfig, PeerInfo, ReplyHandle};
 pub use protocol::PROTOCOL_VERSION;
 pub use schema::{
     AdvancedEditor, ConfigFormat, FieldDef, FieldGroup, FieldKind, FieldValue, ModuleManifest,
+    ShortcutEntry,
 };
 pub use security::IntegrityInfo;
 pub use theme::{AccentMode, ResolvedTheme, ThemeConfig, ThemeMaterial, ThemeMode};
@@ -269,6 +271,60 @@ mod tests {
         assert_eq!(back.get("enabled"), Some(&FieldValue::Bool(false)));
 
         std::env::remove_var("NOREN_CONFIG_DIR");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shortcut_list_parse_format_and_toml_roundtrip() {
+        let raw = "yt | YouTube | https://www.youtube.com/results?search_query={query}\n |  | \n# comment\nmail | Gmail | https://mail.google.com";
+        let parsed = crate::schema::parse_shortcut_list(raw);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].trigger, "yt");
+        assert_eq!(parsed[1].trigger, "");
+        assert_eq!(parsed[2].url, "https://mail.google.com");
+
+        let formatted = crate::schema::format_shortcut_list(&parsed);
+        assert_eq!(crate::schema::parse_shortcut_list(&formatted), parsed);
+
+        let dir = unique_temp_dir("shortcut_toml");
+        let cfg_path = dir.join("config.toml");
+        let manifest = ModuleManifest {
+            id: "launcher".to_string(),
+            name: "Launcher".to_string(),
+            version: "0.1.0".to_string(),
+            executable: None,
+            config_format: ConfigFormat::Toml,
+            config_file: "config.toml".to_string(),
+            groups: vec![FieldGroup {
+                id: "web".to_string(),
+                title: "Web".to_string(),
+                fields: vec![FieldDef {
+                    key: "bang_shortcuts".to_string(),
+                    label: "Custom ! Shortcuts".to_string(),
+                    kind: FieldKind::ShortcutList,
+                    description: None,
+                    requires_running: false,
+                    default_bool: None,
+                    default_number: None,
+                    default_text: Some(formatted.clone()),
+                    min: None,
+                    max: None,
+                    step: None,
+                    choices: Vec::new(),
+                    nullable: false,
+                    placeholder: None,
+                    command: None,
+                }],
+            }],
+            advanced_editors: Vec::new(),
+        };
+
+        let mut vals = HashMap::new();
+        vals.insert("bang_shortcuts".to_string(), FieldValue::Text(formatted.clone()));
+        save_toml_atomic(&cfg_path, &manifest, &vals).unwrap();
+        let reloaded = load_toml_file(&cfg_path, &manifest).unwrap();
+        assert_eq!(reloaded.get("bang_shortcuts"), Some(&FieldValue::Text(formatted)));
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -12,6 +12,7 @@ pub const CAP_OSD_WORKSPACE: &str = "osd.workspace";
 pub const CAP_LAUNCHER_ACTIONS: &str = "launcher.actions";
 pub const CAP_SETTINGS_SCHEMA: &str = "settings.schema";
 pub const CAP_CONTROLCENTER_FOCUS: &str = "controlcenter.focus";
+pub const CAP_TRAY_ACTIONS: &str = "tray.actions";
 
 /// Well-known global event names outside capabilities.
 pub const EVENT_THEME_CHANGED: &str = "theme.changed";

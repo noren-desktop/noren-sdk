@@ -84,6 +84,17 @@ pub fn current_user_sid() -> Result<String, SdkError> {
 
 /// Returns the current process's Windows integrity level and elevation flag.
 pub fn current_integrity_info() -> IntegrityInfo {
+    if std::env::var("NOREN_PIPE_PREFIX")
+        .ok()
+        .is_some_and(|p| !p.trim().is_empty() && p.trim() != "noren.")
+        && std::env::var("NOREN_SIMULATE_ELEVATED").as_deref() == Ok("1")
+    {
+        return IntegrityInfo {
+            level: "High".to_string(),
+            elevated: true,
+        };
+    }
+
     let Ok(token) = open_process_query_token() else {
         return IntegrityInfo {
             level: "Unknown".to_string(),

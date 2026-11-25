@@ -10,7 +10,7 @@ use noren_sdk::control_center::{maybe_run_control_center_from_args, open_control
 use noren_sdk::paths::module_config_path;
 use noren_sdk::protocol::{
     CAP_LAUNCHER_ACTIONS, CAP_LAYOUT_RESERVED_AREA, CAP_OSD_WORKSPACE, CAP_SETTINGS_SCHEMA,
-    CAP_WORKSPACE_STATE,
+    CAP_TRAY_ACTIONS, CAP_WORKSPACE_STATE,
 };
 use noren_sdk::schema::{ConfigFormat, FieldDef, FieldGroup, FieldKind, FieldValue, ModuleManifest};
 use noren_sdk::storage::{
@@ -19,6 +19,7 @@ use noren_sdk::storage::{
 use noren_sdk::theme::{
     AccentMode, ResolvedTheme, ThemeConfig, ThemeMaterial, ThemeMode, load_theme, save_theme,
 };
+use noren_sdk::tray::{TrayConfig, TrayMenuItem, TrayModulePayload, TrayService};
 use noren_sdk::{NipEvent, NipNode, NodeConfig};
 use serde_json::{Value, json};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -34,8 +35,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_PUSHBUTTON, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect,
     GetMessageW, IDC_ARROW, LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-    SW_SHOW, ShowWindow, TranslateMessage, WM_APP, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_PAINT,
-    WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    SW_SHOW, ShowWindow, TranslateMessage, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
+    WM_PAINT, WNDCLASSW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
 
@@ -197,28 +198,57 @@ fn build_testbed_manifest(module: &str) -> ModuleManifest {
     }
 }
 
+fn build_testbed_tray_payload(module: &str) -> TrayModulePayload {
+    TrayModulePayload {
+        module: module.to_string(),
+        title: format!("Testbed ({module})"),
+        paused: false,
+        items: vec![TrayMenuItem {
+            id: "ping".to_string(),
+            label: format!("Ping connected peers ({module})"),
+            checked: false,
+            enabled: true,
+            separator_before: false,
+            open_path: None,
+        }],
+    }
+}
+
 fn handle_nip_event(
     ev: NipEvent,
     manifest: &ModuleManifest,
     node: &NipNode,
     state: &Arc<Mutex<SharedTestbedState>>,
     hwnd_raw: isize,
+    tray: Option<&TrayService>,
+    stop_flag: Option<&Arc<AtomicBool>>,
 ) {
     let updated;
     match ev {
         NipEvent::PeerConnected(p) => {
+            if let Some(t) = tray {
+                t.notify_topology_changed();
+            }
             let mut st = state.lock().unwrap();
             st.peers = node.peers().into_iter().map(|x| x.module).collect();
             st.last_activity = format!("Peer connected: {} (pid {})", p.module, p.pid);
             updated = true;
         }
         NipEvent::PeerDisconnected { module, graceful } => {
+            if let Some(t) = tray {
+                t.notify_topology_changed();
+            }
             let mut st = state.lock().unwrap();
             st.peers = node.peers().into_iter().map(|x| x.module).collect();
             st.last_activity = format!("Peer left: {module} (graceful={graceful})");
             updated = true;
         }
         NipEvent::StateReceived { from, cap, seq, .. } => {
+            if cap == CAP_TRAY_ACTIONS {
+                if let Some(t) = tray {
+                    t.notify_topology_changed();
+                }
+            }
             let mut st = state.lock().unwrap();
             st.last_activity = format!("State from {from} [{cap}] seq={seq}");
             updated = true;
@@ -226,6 +256,11 @@ fn handle_nip_event(
         NipEvent::EventReceived {
             from, name, data, ..
         } => {
+            if name == "tray.released" {
+                if let Some(t) = tray {
+                    t.notify_topology_changed();
+                }
+            }
             let mut st = state.lock().unwrap();
             st.last_activity = format!("Event from {from}: {name} {data}");
             updated = true;
@@ -259,6 +294,45 @@ fn handle_nip_event(
                         "pong_from": manifest.id,
                         "echo": data,
                     }));
+                }
+                "tray.invoke" => {
+                    let id = data.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    if id == "ping" {
+                        let _ = node.emit_event(
+                            None,
+                            Some("testbed.state"),
+                            "ping_broadcast",
+                            json!({ "from": node.module_name() }),
+                        );
+                        let _ = reply.ok(json!({ "invoked": id }));
+                    } else {
+                        let _ = reply.err(format!("unknown testbed tray item '{id}'"));
+                    }
+                }
+                "tray.quit" => {
+                    let _ = reply.ok(json!({ "quitting": true }));
+                    if let Some(flag) = stop_flag {
+                        flag.store(true, Ordering::Release);
+                    }
+                    if hwnd_raw != 0 {
+                        unsafe {
+                            let _ = PostMessageW(
+                                Some(HWND(hwnd_raw as *mut c_void)),
+                                WM_CLOSE,
+                                WPARAM(0),
+                                LPARAM(0),
+                            );
+                        }
+                    }
+                }
+                "tray.yield" => {
+                    let peer_elevated = node
+                        .peers()
+                        .into_iter()
+                        .find(|p| p.module == from)
+                        .is_some_and(|p| p.elevated);
+                    let yielded = tray.is_some_and(|t| t.request_yield(peer_elevated));
+                    let _ = reply.ok(json!({ "yielded": yielded }));
                 }
                 "get_theme" => {
                     let st = state.lock().unwrap();
@@ -515,6 +589,11 @@ fn run_gui(module: &str, provides: Vec<String>, wants: Vec<String>) -> Result<()
         CAP_LAYOUT_RESERVED_AREA.to_string(),
         json!({ "top_px": 40 }),
     );
+    let tray_payload = build_testbed_tray_payload(module);
+    initial_state.insert(
+        CAP_TRAY_ACTIONS.to_string(),
+        serde_json::to_value(&tray_payload).unwrap(),
+    );
 
     let (node, rx) = NipNode::start(NodeConfig {
         module: module.to_string(),
@@ -569,15 +648,54 @@ fn run_gui(module: &str, provides: Vec<String>, wants: Vec<String>) -> Result<()
         let _ = ShowWindow(hwnd, SW_SHOW);
     }
 
+    let node_action = Arc::clone(&node);
+    let tray = TrayService::start(TrayConfig {
+        module: module.to_string(),
+        tooltip: format!("noren-testbed ({module})"),
+        initial_payload: tray_payload,
+        node: Some(Arc::clone(&node)),
+        on_local_action: Arc::new(move |id| {
+            if id == "ping" {
+                let _ = node_action.emit_event(
+                    None,
+                    Some("testbed.state"),
+                    "ping_broadcast",
+                    json!({ "from": node_action.module_name() }),
+                );
+            }
+        }),
+        on_local_quit: Arc::new(move || unsafe {
+            let _ = PostMessageW(
+                Some(HWND(hwnd_raw as *mut c_void)),
+                WM_CLOSE,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }),
+        on_open_settings: None,
+        headless: false,
+    })
+    .map_err(|e| e.to_string())?;
+    let tray = Arc::new(tray);
+
     let stop = Arc::new(AtomicBool::new(false));
     let stop_bg = Arc::clone(&stop);
     let node_bg = Arc::clone(&node);
     let state_bg = Arc::clone(&state);
     let manifest_bg = manifest.clone();
+    let tray_bg = Arc::clone(&tray);
     let listener = std::thread::spawn(move || {
         while !stop_bg.load(Ordering::Acquire) {
             match rx.recv_timeout(Duration::from_millis(120)) {
-                Ok(ev) => handle_nip_event(ev, &manifest_bg, &node_bg, &state_bg, hwnd_raw),
+                Ok(ev) => handle_nip_event(
+                    ev,
+                    &manifest_bg,
+                    &node_bg,
+                    &state_bg,
+                    hwnd_raw,
+                    Some(&tray_bg),
+                    Some(&stop_bg),
+                ),
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
@@ -593,6 +711,7 @@ fn run_gui(module: &str, provides: Vec<String>, wants: Vec<String>) -> Result<()
     }
 
     stop.store(true, Ordering::Release);
+    tray.shutdown();
     node.shutdown();
     let _ = listener.join();
     Ok(())
@@ -604,18 +723,44 @@ fn run_headless(module: &str, ttl_secs: u64) -> Result<(), String> {
     let theme_cfg = load_theme();
     let resolved = theme_cfg.resolve();
 
+    let tray_payload = build_testbed_tray_payload(module);
     let mut initial_state = HashMap::new();
     initial_state.insert(
         "testbed.state".to_string(),
         json!({ "module": module, "ready": true }),
     );
+    initial_state.insert(
+        CAP_TRAY_ACTIONS.to_string(),
+        serde_json::to_value(&tray_payload).unwrap(),
+    );
     let (node, rx) = NipNode::start(NodeConfig {
         module: module.to_string(),
         version: "0.1.0".to_string(),
-        provides: vec!["testbed.state".to_string(), CAP_SETTINGS_SCHEMA.to_string()],
-        wants: vec!["testbed.state".to_string()],
+        provides: vec![
+            "testbed.state".to_string(),
+            CAP_SETTINGS_SCHEMA.to_string(),
+            CAP_TRAY_ACTIONS.to_string(),
+        ],
+        wants: vec!["testbed.state".to_string(), CAP_TRAY_ACTIONS.to_string()],
         allowlist: None,
         initial_state,
+    })
+    .map_err(|e| e.to_string())?;
+    let node = Arc::new(node);
+
+    let quit_flag = Arc::new(AtomicBool::new(false));
+    let quit_cb = Arc::clone(&quit_flag);
+    let tray = TrayService::start(TrayConfig {
+        module: module.to_string(),
+        tooltip: format!("noren-testbed ({module})"),
+        initial_payload: tray_payload,
+        node: Some(Arc::clone(&node)),
+        on_local_action: Arc::new(|_| {}),
+        on_local_quit: Arc::new(move || {
+            quit_cb.store(true, Ordering::Release);
+        }),
+        on_open_settings: None,
+        headless: true,
     })
     .map_err(|e| e.to_string())?;
 
@@ -629,13 +774,22 @@ fn run_headless(module: &str, ttl_secs: u64) -> Result<(), String> {
 
     println!("HEADLESS_READY module={module} pid={}", std::process::id());
     let deadline = Instant::now() + Duration::from_secs(ttl_secs);
-    while Instant::now() < deadline {
+    while Instant::now() < deadline && !quit_flag.load(Ordering::Acquire) {
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(ev) => handle_nip_event(ev, &manifest, &node, &state, 0),
+            Ok(ev) => handle_nip_event(
+                ev,
+                &manifest,
+                &node,
+                &state,
+                0,
+                Some(&tray),
+                Some(&quit_flag),
+            ),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+    tray.shutdown();
     node.shutdown();
     Ok(())
 }
@@ -903,6 +1057,7 @@ fn main() {
             CAP_LAYOUT_RESERVED_AREA,
             CAP_LAUNCHER_ACTIONS,
             CAP_SETTINGS_SCHEMA,
+            CAP_TRAY_ACTIONS,
         ],
     );
     let wants = parse_list(
@@ -912,6 +1067,7 @@ fn main() {
             CAP_WORKSPACE_STATE,
             CAP_OSD_WORKSPACE,
             CAP_LAYOUT_RESERVED_AREA,
+            CAP_TRAY_ACTIONS,
         ],
     );
 

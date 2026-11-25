@@ -21,6 +21,7 @@ pub enum FieldKind {
     Color,
     Text,
     KeyChord,
+    ShortcutList,
     Action,
 }
 
@@ -111,9 +112,9 @@ impl FieldDef {
             FieldKind::Color => Some(FieldValue::Text(self.default_text.clone().unwrap_or_else(
                 || if self.nullable { "off" } else { "#FFFFFF" }.to_string(),
             ))),
-            FieldKind::Text | FieldKind::KeyChord => Some(FieldValue::Text(
-                self.default_text.clone().unwrap_or_default(),
-            )),
+            FieldKind::Text | FieldKind::KeyChord | FieldKind::ShortcutList => {
+                Some(FieldValue::Text(self.default_text.clone().unwrap_or_default()))
+            }
             FieldKind::Action => None,
         }
     }
@@ -171,4 +172,60 @@ pub fn validate_key_chord(s: &str) -> bool {
     }
     mods.iter()
         .all(|m| matches!(*m, "win" | "ctrl" | "alt" | "shift"))
+}
+
+/// One user-customizable `!` bang/shortcut entry stored in `FieldKind::ShortcutList`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShortcutEntry {
+    pub trigger: String,
+    pub label: String,
+    pub url: String,
+}
+
+/// Parses newline-delimited `trigger | label | url` lines into `ShortcutEntry` rows.
+/// Lines with `|` preserve empty cells so newly added rows remain editable in Control Center.
+pub fn parse_shortcut_list(raw: &str) -> Vec<ShortcutEntry> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let clean = line.trim_end_matches('\r');
+        let trimmed = clean.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if !clean.contains('|') {
+            if trimmed.is_empty() {
+                continue;
+            }
+            continue;
+        }
+        let mut parts = clean.splitn(3, '|');
+        let trigger = parts.next().unwrap_or("").trim().to_string();
+        let label = parts.next().unwrap_or("").trim().to_string();
+        let url = parts.next().unwrap_or("").trim().to_string();
+        out.push(ShortcutEntry {
+            trigger,
+            label,
+            url,
+        });
+    }
+    out
+}
+
+/// Serializes `ShortcutEntry` rows back into newline-delimited `trigger | label | url` text.
+pub fn format_shortcut_list(entries: &[ShortcutEntry]) -> String {
+    let sanitize_col = |s: &str| -> String {
+        s.replace(['\r', '\n'], " ").replace('|', "-")
+    };
+    entries
+        .iter()
+        .map(|e| {
+            format!(
+                "{} | {} | {}",
+                sanitize_col(e.trigger.trim()),
+                sanitize_col(e.label.trim()),
+                e.url.replace(['\r', '\n'], "").trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

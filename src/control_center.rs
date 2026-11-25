@@ -19,8 +19,9 @@ use crate::paths::{module_config_path, pipe_prefix};
 use crate::pipe::{OverlappedPipe, connect_client_pipe, discover_peers, EventHandle};
 use crate::protocol::{CAP_CONTROLCENTER_FOCUS, CAP_SETTINGS_SCHEMA, Message, PROTOCOL_VERSION};
 use crate::schema::{
-    FieldDef, FieldKind, FieldValue, ModuleManifest, format_hex_color, parse_hex_color,
-    validate_key_chord,
+    default_values_for_manifest, format_hex_color, format_shortcut_list, parse_hex_color,
+    parse_shortcut_list, validate_key_chord, FieldDef, FieldKind, FieldValue, ModuleManifest,
+    ShortcutEntry,
 };
 use crate::security::current_user_sid;
 use crate::storage::{load_config_values, load_installed_manifests, save_config_values};
@@ -195,6 +196,12 @@ enum Msg {
     SetNumber(String, f64),
     SetChoice(String, Option<usize>),
     SetText(String, String),
+    AddShortcutRow(String),
+    RemoveShortcutRow(String, usize),
+    SetShortcutTrigger(String, usize, String),
+    SetShortcutLabel(String, usize, String),
+    SetShortcutUrl(String, usize, String),
+    ResetShortcutDefaults(String),
     ToggleFieldColorPicker(String),
     PickFieldColor(String, Color),
     SetFieldColorAccent(String),
@@ -221,6 +228,12 @@ impl Clone for Msg {
             Self::SetNumber(k, v) => Self::SetNumber(k.clone(), *v),
             Self::SetChoice(k, v) => Self::SetChoice(k.clone(), *v),
             Self::SetText(k, v) => Self::SetText(k.clone(), v.clone()),
+            Self::AddShortcutRow(k) => Self::AddShortcutRow(k.clone()),
+            Self::RemoveShortcutRow(k, i) => Self::RemoveShortcutRow(k.clone(), *i),
+            Self::SetShortcutTrigger(k, i, v) => Self::SetShortcutTrigger(k.clone(), *i, v.clone()),
+            Self::SetShortcutLabel(k, i, v) => Self::SetShortcutLabel(k.clone(), *i, v.clone()),
+            Self::SetShortcutUrl(k, i, v) => Self::SetShortcutUrl(k.clone(), *i, v.clone()),
+            Self::ResetShortcutDefaults(k) => Self::ResetShortcutDefaults(k.clone()),
             Self::ToggleFieldColorPicker(k) => Self::ToggleFieldColorPicker(k.clone()),
             Self::PickFieldColor(k, c) => Self::PickFieldColor(k.clone(), *c),
             Self::SetFieldColorAccent(k) => Self::SetFieldColorAccent(k.clone()),
@@ -307,7 +320,11 @@ impl ControlCenterApp {
     fn refresh_manifests(&mut self) {
         let installed = load_installed_manifests();
         for manifest in installed {
-            if self.tabs.iter().any(|t| t.manifest.id == manifest.id) {
+            if let Some(existing) = self.tabs.iter_mut().find(|t| t.manifest.id == manifest.id) {
+                existing.manifest = manifest;
+                for (k, v) in default_values_for_manifest(&existing.manifest) {
+                    existing.values.entry(k).or_insert(v);
+                }
                 continue;
             }
             let config_path = module_config_path(&manifest.id, &manifest.config_file);
@@ -717,6 +734,102 @@ impl ControlCenterApp {
                             .vertical_alignment(VerticalAlignment::Center),
                     ))
             }
+            FieldKind::ShortcutList => {
+                let raw = match tab.values.get(&field.key) {
+                    Some(FieldValue::Text(s)) => s.as_str(),
+                    _ => "",
+                };
+                let entries = parse_shortcut_list(raw);
+                let mut rows: Vec<KeyedView> = Vec::with_capacity(entries.len() + 2);
+
+                rows.push(KeyedView::new(
+                    format!("{}-hdr", field.key),
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(6.0)
+                        .children((
+                            TextBlock::new()
+                                .width(82.0)
+                                .text("!Prefix")
+                                .font_size(11.5),
+                            TextBlock::new()
+                                .width(130.0)
+                                .text("Name")
+                                .font_size(11.5),
+                            TextBlock::new()
+                                .text("URL ({query} or direct URL)")
+                                .font_size(11.5),
+                        )),
+                ));
+
+                for (idx, entry) in entries.into_iter().enumerate() {
+                    let k_trig = key.clone();
+                    let k_lbl = key.clone();
+                    let k_url = key.clone();
+                    let k_rm = key.clone();
+                    rows.push(KeyedView::new(
+                        format!("{}-sc-row-{idx}", field.key),
+                        StackPanel::new()
+                            .orientation(Orientation::Horizontal)
+                            .spacing(6.0)
+                            .children((
+                                TextBlock::new()
+                                    .width(8.0)
+                                    .text("!")
+                                    .vertical_alignment(VerticalAlignment::Center),
+                                TextBox::new()
+                                    .width(68.0)
+                                    .text(entry.trigger)
+                                    .placeholder_text("yt")
+                                    .is_enabled(enabled)
+                                    .on_text_changed(ctx.callback(move |t| {
+                                        Msg::SetShortcutTrigger(k_trig.clone(), idx, t)
+                                    })),
+                                TextBox::new()
+                                    .width(130.0)
+                                    .text(entry.label)
+                                    .placeholder_text("YouTube")
+                                    .is_enabled(enabled)
+                                    .on_text_changed(ctx.callback(move |t| {
+                                        Msg::SetShortcutLabel(k_lbl.clone(), idx, t)
+                                    })),
+                                TextBox::new()
+                                    .width(290.0)
+                                    .text(entry.url)
+                                    .placeholder_text("https://.../search?q={query}")
+                                    .is_enabled(enabled)
+                                    .on_text_changed(ctx.callback(move |t| {
+                                        Msg::SetShortcutUrl(k_url.clone(), idx, t)
+                                    })),
+                                Button::new()
+                                    .is_enabled(enabled)
+                                    .on_click(ctx.message(Msg::RemoveShortcutRow(k_rm, idx)))
+                                    .content("Remove"),
+                            )),
+                    ));
+                }
+
+                let k_add = key.clone();
+                let k_reset = key.clone();
+                rows.push(KeyedView::new(
+                    format!("{}-sc-actions", field.key),
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(8.0)
+                        .children((
+                            Button::new()
+                                .is_enabled(enabled)
+                                .on_click(ctx.message(Msg::AddShortcutRow(k_add)))
+                                .content("+ Add ! Shortcut"),
+                            Button::new()
+                                .is_enabled(enabled)
+                                .on_click(ctx.message(Msg::ResetShortcutDefaults(k_reset)))
+                                .content("Reset Defaults"),
+                        )),
+                ));
+
+                StackPanel::new().spacing(6.0).keyed_children(rows)
+            }
             FieldKind::Action => {
                 let cmd = field.command.clone().unwrap_or_else(|| field.key.clone());
                 let label = field.label.clone();
@@ -895,6 +1008,91 @@ impl Component for ControlCenterApp {
             Msg::SetText(k, text) => {
                 if let Some(tab) = self.current_module_mut() {
                     tab.values.insert(k, FieldValue::Text(text));
+                }
+            }
+            Msg::AddShortcutRow(k) => {
+                if let Some(tab) = self.current_module_mut() {
+                    let raw = match tab.values.get(&k) {
+                        Some(FieldValue::Text(s)) => s.as_str(),
+                        _ => "",
+                    };
+                    let mut entries = parse_shortcut_list(raw);
+                    entries.push(ShortcutEntry {
+                        trigger: String::new(),
+                        label: String::new(),
+                        url: String::new(),
+                    });
+                    tab.values
+                        .insert(k, FieldValue::Text(format_shortcut_list(&entries)));
+                }
+            }
+            Msg::RemoveShortcutRow(k, idx) => {
+                if let Some(tab) = self.current_module_mut() {
+                    let raw = match tab.values.get(&k) {
+                        Some(FieldValue::Text(s)) => s.as_str(),
+                        _ => "",
+                    };
+                    let mut entries = parse_shortcut_list(raw);
+                    if idx < entries.len() {
+                        entries.remove(idx);
+                    }
+                    tab.values
+                        .insert(k, FieldValue::Text(format_shortcut_list(&entries)));
+                }
+            }
+            Msg::SetShortcutTrigger(k, idx, val) => {
+                if let Some(tab) = self.current_module_mut() {
+                    let raw = match tab.values.get(&k) {
+                        Some(FieldValue::Text(s)) => s.as_str(),
+                        _ => "",
+                    };
+                    let mut entries = parse_shortcut_list(raw);
+                    if let Some(entry) = entries.get_mut(idx) {
+                        entry.trigger = val;
+                    }
+                    tab.values
+                        .insert(k, FieldValue::Text(format_shortcut_list(&entries)));
+                }
+            }
+            Msg::SetShortcutLabel(k, idx, val) => {
+                if let Some(tab) = self.current_module_mut() {
+                    let raw = match tab.values.get(&k) {
+                        Some(FieldValue::Text(s)) => s.as_str(),
+                        _ => "",
+                    };
+                    let mut entries = parse_shortcut_list(raw);
+                    if let Some(entry) = entries.get_mut(idx) {
+                        entry.label = val;
+                    }
+                    tab.values
+                        .insert(k, FieldValue::Text(format_shortcut_list(&entries)));
+                }
+            }
+            Msg::SetShortcutUrl(k, idx, val) => {
+                if let Some(tab) = self.current_module_mut() {
+                    let raw = match tab.values.get(&k) {
+                        Some(FieldValue::Text(s)) => s.as_str(),
+                        _ => "",
+                    };
+                    let mut entries = parse_shortcut_list(raw);
+                    if let Some(entry) = entries.get_mut(idx) {
+                        entry.url = val;
+                    }
+                    tab.values
+                        .insert(k, FieldValue::Text(format_shortcut_list(&entries)));
+                }
+            }
+            Msg::ResetShortcutDefaults(k) => {
+                if let Some(tab) = self.current_module_mut() {
+                    let default_val = tab
+                        .manifest
+                        .groups
+                        .iter()
+                        .flat_map(|g| g.fields.iter())
+                        .find(|f| f.key == k)
+                        .and_then(|f| f.default_text.clone())
+                        .unwrap_or_default();
+                    tab.values.insert(k, FieldValue::Text(default_val));
                 }
             }
             Msg::ToggleFieldColorPicker(k) => {
